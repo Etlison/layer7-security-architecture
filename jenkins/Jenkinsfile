@@ -1,0 +1,111 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION   = 'us-east-1'
+    CLUSTER_NAME = 'layer7-security-dev-eks'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Preflight') {
+      steps {
+        sh '''
+          aws --version
+          terraform version
+          kubectl version --client=true || true
+        '''
+      }
+    }
+
+    stage('Security Scan') {
+      steps {
+        sh '''
+          echo "Run Trivy/SonarQube here"
+          # trivy fs --exit-code 1 --severity HIGH,CRITICAL .
+        '''
+      }
+    }
+
+    stage('Terraform Init') {
+      steps {
+        dir('terraform/envs/dev') {
+          sh 'terraform init'
+        }
+      }
+    }
+
+    stage('Terraform Validate') {
+      steps {
+        dir('terraform/envs/dev') {
+          sh 'terraform validate'
+        }
+      }
+    }
+
+    stage('Terraform Plan') {
+      steps {
+        dir('terraform/envs/dev') {
+          sh 'terraform plan -out=tfplan'
+        }
+      }
+    }
+
+    stage('Terraform Apply') {
+      steps {
+        dir('terraform/envs/dev') {
+          sh 'terraform apply -auto-approve tfplan'
+        }
+      }
+    }
+
+    stage('Update Kubeconfig') {
+      steps {
+        sh 'aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME'
+      }
+    }
+
+    stage('Install ALB Controller') {
+      steps {
+        sh 'chmod +x scripts/install-alb-controller.sh && scripts/install-alb-controller.sh'
+      }
+    }
+
+    stage('Deploy App') {
+      steps {
+        sh '''
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/ingress.yaml
+          kubectl rollout status deployment/layer7-demo-app --timeout=180s
+        '''
+      }
+    }
+
+    stage('Smoke Test') {
+      steps {
+        sh 'chmod +x scripts/smoke-test.sh && scripts/smoke-test.sh'
+      }
+    }
+
+    stage('Validate WAF') {
+      steps {
+        sh 'chmod +x scripts/test-waf-rules.sh && scripts/test-waf-rules.sh'
+      }
+    }
+  }
+
+  post {
+    success {
+      echo 'Layer 7 security architecture deployed successfully.'
+    }
+
+    failure {
+      echo 'Pipeline failed. Check Jenkins, CloudWatch, CloudTrail, and WAF logs.'
+    }
+  }
+}
